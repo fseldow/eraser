@@ -24,6 +24,18 @@ const (
 	PipeMode             = 0o644
 	EraseCompleteMessage = "complete"
 
+	LinuxEraserPath   = "/run/eraser.sh"
+	WindowsEraserPath = `C:\run\eraser.sh`
+
+	LinuxSharedDataPath   = LinuxEraserPath + "/shared-data"
+	WindowsSharedDataPath = WindowsEraserPath + `\shared-data`
+
+	ScanErasePath            = LinuxSharedDataPath + "/scanErase"
+	CollectScanPath          = LinuxSharedDataPath + "/collectScan"
+	EraseCompleteCollectPath = LinuxSharedDataPath + "/eraseCompleteCollect"
+	EraseCompleteMessage     = "complete"
+	EraseCompleteScanPath    = LinuxSharedDataPath + "/eraseCompleteScan"
+
 	EnvEraserRuntimeName = "ERASER_RUNTIME_NAME"
 )
 
