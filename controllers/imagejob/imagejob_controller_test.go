@@ -228,6 +228,33 @@ func TestSkipWindowsScannerNodes(t *testing.T) {
 	})
 }
 
+func TestFillWindowsPodSpecDisablesTelemetry(t *testing.T) {
+	spec := newTemplateSpec()
+	// The manager injects the OTLP endpoint on worker containers; here the
+	// remover container carries a cluster service-style endpoint.
+	spec.Containers[1].Env = append(spec.Containers[1].Env, corev1.EnvVar{
+		Name:  "OTEL_EXPORTER_OTLP_ENDPOINT",
+		Value: "otel-collector:4318",
+	})
+
+	fillWindowsPodSpec(spec)
+
+	found := false
+	for i := range spec.Containers {
+		for _, e := range spec.Containers[i].Env {
+			if e.Name == "OTEL_EXPORTER_OTLP_ENDPOINT" {
+				found = true
+				if e.Value != "" {
+					t.Errorf("container %q OTLP endpoint = %q, want cleared on windows", spec.Containers[i].Name, e.Value)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("expected the OTLP endpoint env var to be present (and cleared), but it was missing")
+	}
+}
+
 func TestRaiseWindowsMemoryLimit(t *testing.T) {
 	cases := []struct {
 		name    string

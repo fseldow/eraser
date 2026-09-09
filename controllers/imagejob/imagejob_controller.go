@@ -686,6 +686,24 @@ func fillWindowsPodSpec(templateSpec *corev1.PodSpec) {
 		for j := range c.Args {
 			c.Args[j] = translateEraserArg(c.Args[j])
 		}
+
+		// Windows HostProcess pods can't reach in-cluster telemetry endpoints
+		// (see disableWindowsTelemetry), so drop the OTLP endpoint here.
+		disableWindowsTelemetry(c)
+	}
+}
+
+const otlpEndpointEnvVar = "OTEL_EXPORTER_OTLP_ENDPOINT"
+
+func disableWindowsTelemetry(c *corev1.Container) {
+	for i := range c.Env {
+		if c.Env[i].Name == otlpEndpointEnvVar && c.Env[i].Value != "" {
+			log.Info("telemetry export is not supported on windows yet; clearing the OTLP endpoint on the windows worker (a HostProcess pod uses host DNS and cannot resolve in-cluster service endpoints)",
+				"container", c.Name,
+				"otlpEndpoint", c.Env[i].Value,
+			)
+			c.Env[i].Value = ""
+		}
 	}
 }
 
