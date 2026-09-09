@@ -66,8 +66,7 @@ const (
 )
 
 var (
-	log                           = logf.Log.WithName("controller").WithValues("process", "imagejob-controller")
-	errWindowsScannerNotSupported = errors.New("windows scanner is not supported")
+	log = logf.Log.WithName("controller").WithValues("process", "imagejob-controller")
 )
 
 var defaultTolerations = []corev1.Toleration{
@@ -363,6 +362,9 @@ func (r *Reconciler) handleNewJob(ctx context.Context, imageJob *eraserv1.ImageJ
 		return errors.Errorf("invalid node filter option")
 	}
 
+	scannerEnabled := len(template.Template.Spec.Containers) > 2
+	nodeList, skipped = skipWindowsScannerNodes(nodeList, skipped, scannerEnabled)
+
 	imageJob.Status.Skipped = skipped
 	if err := r.updateJobStatus(ctx, imageJob); err != nil {
 		return err
@@ -374,14 +376,6 @@ func (r *Reconciler) handleNewJob(ctx context.Context, imageJob *eraserv1.ImageJ
 		log := log.WithValues("node", nodeList[i].Name)
 		podSpec, err := copyAndFillTemplateSpec(&podSpecTemplate, env, &nodeList[i], &eraserConfig.Manager.Runtime)
 		if err != nil {
-			if err == errWindowsScannerNotSupported {
-				imageJob.Status.Skipped++
-				if err := r.updateJobStatus(ctx, imageJob); err != nil {
-					return err
-				}
-				log.Error(err, "eraser will skip on windows node", "nodeName", nodeList[i].Name)
-				continue
-			}
 			return err
 		}
 
@@ -477,6 +471,26 @@ func (r *Reconciler) updateJobStatus(ctx context.Context, imageJob *eraserv1.Ima
 		}
 	}
 	return nil
+}
+
+func skipWindowsScannerNodes(nodeList []corev1.Node, skipped int, scannerEnabled bool) ([]corev1.Node, int) {
+	if !scannerEnabled {
+		return nodeList, skipped
+	}
+
+	kept := make([]corev1.Node, 0, len(nodeList))
+	for i := range nodeList {
+		if isWindowsNode(&nodeList[i]) {
+			log.Info("windows node skipped because image scanning is enabled (scanner is not supported on windows yet)",
+				"nodeName", nodeList[i].Name,
+			)
+			skipped++
+			continue
+		}
+		kept = append(kept, nodeList[i])
+	}
+
+	return kept, skipped
 }
 
 func selectIncludedNodes(nodes *corev1.NodeList, includeNodesSelectors []string) ([]corev1.Node, int, error) {
@@ -604,9 +618,9 @@ func copyAndFillTemplateSpec(templateSpecTemplate *corev1.PodSpec, env []corev1.
 		// and ignores runtimeSpec.Address. Propagate a configurable Windows
 		// runtime address to the worker (a named pipe can't be hostPath-mounted
 		// like a Linux socket) in a follow-up.
-		if len(templateSpec.Containers) > 2 {
-			return nil, errWindowsScannerNotSupported
-		}
+		//
+		// Windows nodes with a scanner enabled are filtered out earlier (see
+		// handleNewJob), so a scanner container is never reached here.
 		fillWindowsPodSpec(templateSpec)
 	}
 

@@ -191,14 +191,41 @@ func TestCopyAndFillTemplateSpecWindows(t *testing.T) {
 	}
 }
 
-func TestCopyAndFillTemplateSpecWindowsScannerUnsupported(t *testing.T) {
-	templateSpec := newTemplateSpec()
-	templateSpec.Containers = append(templateSpec.Containers, corev1.Container{Name: "scanner"})
-
-	_, err := copyAndFillTemplateSpec(templateSpec, nil, node("win-node", "windows"), runtimeSpec())
-	if err != errWindowsScannerNotSupported {
-		t.Errorf("error = %v, want %v", err, errWindowsScannerNotSupported)
+func TestSkipWindowsScannerNodes(t *testing.T) {
+	newNodes := func() []corev1.Node {
+		return []corev1.Node{
+			*node("linux-node", "linux"),
+			*node("win-node", "windows"),
+		}
 	}
+
+	t.Run("scanner enabled skips windows node", func(t *testing.T) {
+		kept, skipped := skipWindowsScannerNodes(newNodes(), 0, true)
+		if skipped != 1 {
+			t.Errorf("skipped = %d, want 1 (the windows node)", skipped)
+		}
+		if len(kept) != 1 || kept[0].Name != "linux-node" {
+			names := make([]string, len(kept))
+			for i := range kept {
+				names[i] = kept[i].Name
+			}
+			t.Errorf("kept nodes = %v, want [linux-node]", names)
+		}
+	})
+
+	t.Run("scanner enabled preserves prior skipped count", func(t *testing.T) {
+		_, skipped := skipWindowsScannerNodes(newNodes(), 3, true)
+		if skipped != 4 {
+			t.Errorf("skipped = %d, want 4 (3 prior + 1 windows)", skipped)
+		}
+	})
+
+	t.Run("scanner disabled keeps all nodes", func(t *testing.T) {
+		kept, skipped := skipWindowsScannerNodes(newNodes(), 0, false)
+		if len(kept) != 2 || skipped != 0 {
+			t.Errorf("got kept=%d skipped=%d, want both nodes kept", len(kept), skipped)
+		}
+	})
 }
 
 func TestRaiseWindowsMemoryLimit(t *testing.T) {
