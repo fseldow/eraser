@@ -375,6 +375,7 @@ func (r *Reconciler) handleNewJob(ctx context.Context, imageJob *eraserv1.ImageJ
 		podSpec, err := copyAndFillTemplateSpec(&podSpecTemplate, env, &nodeList[i], &eraserConfig.Manager.Runtime)
 		if err != nil {
 			if err == errWindowsScannerNotSupported {
+				imageJob.Status.Skipped++
 				log.Error(err, "eraser will skip on windows node", "nodeName", nodeList[i].Name)
 				continue
 			}
