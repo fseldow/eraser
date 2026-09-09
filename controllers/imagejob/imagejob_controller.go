@@ -376,6 +376,9 @@ func (r *Reconciler) handleNewJob(ctx context.Context, imageJob *eraserv1.ImageJ
 		if err != nil {
 			if err == errWindowsScannerNotSupported {
 				imageJob.Status.Skipped++
+				if err := r.updateJobStatus(ctx, imageJob); err != nil {
+					return err
+				}
 				log.Error(err, "eraser will skip on windows node", "nodeName", nodeList[i].Name)
 				continue
 			}
