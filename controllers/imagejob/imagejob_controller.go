@@ -65,9 +65,7 @@ const (
 	windowsMinMemoryLimit = "256Mi"
 )
 
-var (
-	log = logf.Log.WithName("controller").WithValues("process", "imagejob-controller")
-)
+var log = logf.Log.WithName("controller").WithValues("process", "imagejob-controller")
 
 var defaultTolerations = []corev1.Toleration{
 	{
