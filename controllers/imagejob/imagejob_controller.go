@@ -65,7 +65,10 @@ const (
 	windowsMinMemoryLimit = "256Mi"
 )
 
-var log = logf.Log.WithName("controller").WithValues("process", "imagejob-controller")
+var (
+	log                           = logf.Log.WithName("controller").WithValues("process", "imagejob-controller")
+	errWindowsScannerNotSupported = errors.New("windows scanner is not supported")
+)
 
 var defaultTolerations = []corev1.Toleration{
 	{
@@ -371,6 +374,10 @@ func (r *Reconciler) handleNewJob(ctx context.Context, imageJob *eraserv1.ImageJ
 		log := log.WithValues("node", nodeList[i].Name)
 		podSpec, err := copyAndFillTemplateSpec(&podSpecTemplate, env, &nodeList[i], &eraserConfig.Manager.Runtime)
 		if err != nil {
+			if err == errWindowsScannerNotSupported {
+				log.Error(err, "eraser will skip on windows node", "nodeName", nodeList[i].Name)
+				continue
+			}
 			return err
 		}
 
@@ -593,6 +600,9 @@ func copyAndFillTemplateSpec(templateSpecTemplate *corev1.PodSpec, env []corev1.
 		// and ignores runtimeSpec.Address. Propagate a configurable Windows
 		// runtime address to the worker (a named pipe can't be hostPath-mounted
 		// like a Linux socket) in a follow-up.
+		if len(templateSpec.Containers) > 2 {
+			return nil, errWindowsScannerNotSupported
+		}
 		fillWindowsPodSpec(templateSpec)
 	}
 

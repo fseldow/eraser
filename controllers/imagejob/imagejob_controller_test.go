@@ -191,6 +191,16 @@ func TestCopyAndFillTemplateSpecWindows(t *testing.T) {
 	}
 }
 
+func TestCopyAndFillTemplateSpecWindowsScannerUnsupported(t *testing.T) {
+	templateSpec := newTemplateSpec()
+	templateSpec.Containers = append(templateSpec.Containers, corev1.Container{Name: "scanner"})
+
+	_, err := copyAndFillTemplateSpec(templateSpec, nil, node("win-node", "windows"), runtimeSpec())
+	if err != errWindowsScannerNotSupported {
+		t.Errorf("error = %v, want %v", err, errWindowsScannerNotSupported)
+	}
+}
+
 func TestRaiseWindowsMemoryLimit(t *testing.T) {
 	cases := []struct {
 		name    string
