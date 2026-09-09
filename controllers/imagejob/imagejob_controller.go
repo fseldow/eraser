@@ -682,7 +682,10 @@ func raiseWindowsMemoryLimit(c *corev1.Container) {
 // shared-data emptyDir mount or the imagelist configmap mount) from its Linux
 // form to the Windows form.
 func linuxToWindowsEraserPath(p string) string {
-	if strings.HasPrefix(p, eraserUtils.LinuxEraserPath) {
+	if p == eraserUtils.LinuxEraserPath {
+		return eraserUtils.WindowsEraserPath
+	}
+	if strings.HasPrefix(p, eraserUtils.LinuxEraserPath+"/") {
 		rest := strings.ReplaceAll(strings.TrimPrefix(p, eraserUtils.LinuxEraserPath), "/", `\`)
 		return eraserUtils.WindowsEraserPath + rest
 	}

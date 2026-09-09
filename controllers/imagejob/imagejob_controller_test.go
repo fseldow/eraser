@@ -253,3 +253,50 @@ func TestIsWindowsNode(t *testing.T) {
 		})
 	}
 }
+
+func TestLinuxToWindowsEraserPath(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"exact eraser path", "/run/eraser.sh", `C:\run\eraser.sh`},
+		{"file under eraser dir", "/run/eraser.sh/imagelist/images", `C:\run\eraser.sh\imagelist\images`},
+		{"trailing slash", "/run/eraser.sh/", `C:\run\eraser.sh\`},
+		// Sibling paths that only share the textual prefix must be left intact.
+		{"sibling dir suffix", "/run/eraser.sh-old/imagelist", "/run/eraser.sh-old/imagelist"},
+		{"sibling file suffix", "/run/eraser.shx", "/run/eraser.shx"},
+		{"unrelated path", "/var/lib/foo", "/var/lib/foo"},
+		{"empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := linuxToWindowsEraserPath(tc.in); got != tc.want {
+				t.Errorf("linuxToWindowsEraserPath(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTranslateEraserArg(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare path", "/run/eraser.sh/imagelist/images", `C:\run\eraser.sh\imagelist\images`},
+		{"flag with path", "--imagelist=/run/eraser.sh/imagelist/images", `--imagelist=C:\run\eraser.sh\imagelist\images`},
+		{"flag with exact path", "--dir=/run/eraser.sh", `--dir=C:\run\eraser.sh`},
+		{"non-path arg untouched", "--log-level=info", "--log-level=info"},
+		// Sibling path embedded in an arg must not be rewritten.
+		{"sibling path in flag", "--imagelist=/run/eraser.sh-old/imagelist", "--imagelist=/run/eraser.sh-old/imagelist"},
+		{"sibling file suffix", "--path=/run/eraser.shx", "--path=/run/eraser.shx"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := translateEraserArg(tc.in); got != tc.want {
+				t.Errorf("translateEraserArg(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
