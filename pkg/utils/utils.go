@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -21,13 +20,15 @@ import (
 
 const (
 	// npipeProtocol is the network protocol of a Windows named pipe.
-	npipeProtocol            = "npipe"
-	PipeMode                 = 0o644
-	ScanErasePath            = "/run/eraser.sh/shared-data/scanErase"
-	CollectScanPath          = "/run/eraser.sh/shared-data/collectScan"
-	EraseCompleteCollectPath = "/run/eraser.sh/shared-data/eraseCompleteCollect"
-	EraseCompleteMessage     = "complete"
-	EraseCompleteScanPath    = "/run/eraser.sh/shared-data/eraseCompleteScan"
+	npipeProtocol        = "npipe"
+	PipeMode             = 0o644
+	EraseCompleteMessage = "complete"
+
+	LinuxEraserPath   = "/run/eraser.sh"
+	WindowsEraserPath = `C:\run\eraser.sh`
+
+	LinuxSharedDataPath   = LinuxEraserPath + "/shared-data"
+	WindowsSharedDataPath = WindowsEraserPath + `\shared-data`
 
 	EnvEraserRuntimeName = "ERASER_RUNTIME_NAME"
 )
@@ -36,10 +37,54 @@ type ExclusionList struct {
 	Excluded []string `json:"excluded"`
 }
 
+// readAndClose reads until the peer closes, which is what frames the message.
+// The read does not observe ctx once it has started, so the watcher closes the
+// handle to unblock it -- the same mechanism, and the same Linux caveat, as the
+// write side.
+func readAndClose(ctx context.Context, rc io.ReadCloser) ([]byte, error) {
+	done := make(chan struct{})
+	closedByWatcher := make(chan bool, 1)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = rc.Close()
+			closedByWatcher <- true
+		case <-done:
+			closedByWatcher <- false
+		}
+	}()
+
+	data, err := io.ReadAll(rc)
+
+	// Joining the watcher first is what makes the rest unambiguous: once it has
+	// reported, no cancellation close can still land.
+	close(done)
+	if <-closedByWatcher {
+		return nil, ctx.Err()
+	}
+
+	if closeErr := rc.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// The peer sends a fixed message or a JSON list, so nothing legitimate
+	// arrives and says nothing.
+	if len(data) == 0 {
+		return nil, ErrEmptyHandoff
+	}
+
+	return data, nil
+}
+
 var (
 	ErrProtocolNotSupported  = errors.New("protocol not supported")
 	ErrEndpointDeprecated    = errors.New("endpoint is deprecated, please consider using full url format")
 	ErrOnlySupportUnixSocket = errors.New("only support unix socket endpoint")
+	ErrEmptyHandoff          = errors.New("peer connected to the handoff endpoint without sending anything")
 )
 
 func GetConn(ctx context.Context, socketPath string) (conn *grpc.ClientConn, err error) {
@@ -329,68 +374,17 @@ func readConfigMap(path string) ([]string, error) {
 	return images, nil
 }
 
+// ReadCollectScanPipe is the scanner-facing spelling of ReadImagesPipe, kept
+// because custom scanners may call it directly.
 func ReadCollectScanPipe(ctx context.Context) ([]unversioned.Image, error) {
-	timer := time.NewTimer(time.Second)
-	if !timer.Stop() {
-		<-timer.C
-	}
-	defer timer.Stop()
-
-	var f *os.File
-	for {
-		var err error
-
-		f, err = os.OpenFile(CollectScanPath, os.O_RDONLY, 0)
-		if err == nil {
-			break
-		}
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-
-		timer.Reset(time.Second)
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-timer.C:
-			continue
-		}
-	}
-
-	// json data is list of []eraserv1.Image
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return nil, err
-	}
-
-	allImages := []unversioned.Image{}
-	if err = json.Unmarshal(data, &allImages); err != nil {
-		return nil, err
-	}
-
-	return allImages, nil
+	return ReadImagesPipe(ctx, CollectScanPath)
 }
 
+// WriteScanErasePipe is the scanner-facing spelling of WriteImagesPipe, kept
+// because custom scanners may call it directly. It waits indefinitely; reach
+// for WriteImagesPipe when the wait needs to be cancellable.
 func WriteScanErasePipe(vulnerableImages []unversioned.Image) error {
-	data, err := json.Marshal(vulnerableImages)
-	if err != nil {
-		return err
-	}
-
-	if err = mkfifo(ScanErasePath, PipeMode); err != nil {
-		return err
-	}
-
-	file, err := os.OpenFile(ScanErasePath, os.O_WRONLY, 0)
-	if err != nil {
-		return err
-	}
-
-	if _, err := file.Write(data); err != nil {
-		return err
-	}
-
-	return file.Close()
+	return WriteImagesPipe(context.Background(), ScanErasePath, vulnerableImages)
 }
 
 func ProcessRepoDigests(repoDigests []string) ([]string, []error) {

@@ -1,18 +1,18 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/eraser-dev/eraser/pkg/cri"
 	"github.com/eraser-dev/eraser/pkg/logger"
-	"golang.org/x/sys/unix"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	util "github.com/eraser-dev/eraser/pkg/utils"
@@ -73,57 +73,38 @@ func main() {
 	}
 	log.Info("images collected", "finalImages:", finalImages)
 
-	data, err := json.Marshal(finalImages)
-	if err != nil {
-		log.Error(err, "failed to encode finalImages")
-		os.Exit(1)
-	}
-
 	path := util.CollectScanPath
 
 	if *scanDisabled {
 		path = util.ScanErasePath
 	}
 
-	if err := unix.Mkfifo(path, util.PipeMode); err != nil {
-		log.Error(err, "failed to create pipe", "pipeFile", path)
-		os.Exit(1)
-	}
-
-	//nolint:gosec // G304: Opening pipe file is intended functionality
-	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	// Published before the payload, not after: the peer can finish and signal
+	// back the moment it has read the list, so an endpoint created afterwards
+	// can be missed entirely. The scanner already publishes in this order.
+	completion, err := util.CreateCompletionPipe(util.EraseCompleteCollectPath)
 	if err != nil {
-		log.Error(err, "failed to open pipe", "pipeFile", path)
-		os.Exit(1)
-	}
-
-	if _, err := file.Write(data); err != nil {
-		log.Error(err, "failed to write to pipe", "pipeFile", path)
-		os.Exit(1)
-	}
-
-	if err := file.Close(); err != nil {
-		log.Error(err, "failed to close pipe", "pipeFile", path)
-		os.Exit(1)
-	}
-	if err := unix.Mkfifo(util.EraseCompleteCollectPath, util.PipeMode); err != nil {
 		log.Error(err, "failed to create pipe", "pipeFile", util.EraseCompleteCollectPath)
 		os.Exit(1)
 	}
 
-	file, err = os.OpenFile(util.EraseCompleteCollectPath, os.O_RDONLY, 0)
-	if err != nil {
-		log.Error(err, "failed to open pipe", "pipeFile", util.EraseCompleteCollectPath)
+	// Both calls below observe ctx, so the handler can stay registered for the
+	// rest of the process. The stop func is discarded rather than deferred
+	// because every exit path here is os.Exit, which would skip it anyway.
+	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+	if err := util.WriteImagesPipe(ctx, path, finalImages); err != nil {
+		log.Error(err, "failed to send images", "pipeFile", path)
 		os.Exit(1)
 	}
 
-	data, err = io.ReadAll(file)
+	data, err := completion.Await(ctx)
 	if err != nil {
 		log.Error(err, "failed to read pipe", "pipeFile", util.EraseCompleteCollectPath)
 		os.Exit(1)
 	}
 
-	if err := file.Close(); err != nil {
+	if err := completion.Close(); err != nil {
 		log.Error(err, "failed to close pipe", "pipeFile", util.EraseCompleteCollectPath)
 		os.Exit(1)
 	}

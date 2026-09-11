@@ -2,14 +2,12 @@ package template
 
 import (
 	"context"
-	"io"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/eraser-dev/eraser/api/unversioned"
 	"github.com/go-logr/logr"
-	"golang.org/x/sys/unix"
 
 	"github.com/eraser-dev/eraser/pkg/metrics"
 	util "github.com/eraser-dev/eraser/pkg/utils"
@@ -35,6 +33,10 @@ type config struct {
 	deleteScanFailedImages bool
 	deleteEOLImages        bool
 	reportMetrics          bool
+
+	// held from ReceiveImages until Finish: the endpoint must stay published so
+	// the remover can tell a scanner is present
+	completion *util.CompletionPipe
 }
 
 type ConfigFunc func(*config)
@@ -59,7 +61,9 @@ func NewImageProvider(funcs ...ConfigFunc) ImageProvider {
 func (cfg *config) ReceiveImages() ([]unversioned.Image, error) {
 	var err error
 
-	if err := unix.Mkfifo(util.EraseCompleteScanPath, util.PipeMode); err != nil {
+	// published up front so the remover can tell a scanner is present
+	cfg.completion, err = util.CreateCompletionPipe(util.EraseCompleteScanPath)
+	if err != nil {
 		cfg.log.Error(err, "failed to create pipe", "pipeName", util.EraseCompleteScanPath)
 		return nil, err
 	}
@@ -84,7 +88,7 @@ func (cfg *config) SendImages(nonCompliantImages, failedImages []unversioned.Ima
 		nonCompliantImages = append(nonCompliantImages, failedImages...)
 	}
 
-	if err := util.WriteScanErasePipe(nonCompliantImages); err != nil {
+	if err := util.WriteImagesPipe(cfg.ctx, util.ScanErasePath, nonCompliantImages); err != nil {
 		cfg.log.Error(err, "unable to write non-compliant images to scan erase pipe")
 		return err
 	}
@@ -101,26 +105,20 @@ func (cfg *config) SendImages(nonCompliantImages, failedImages []unversioned.Ima
 			return err
 		}
 
-		metrics.ExportMetrics(cfg.log, exporter, reader)
+		metrics.ExportMetrics(ctx, cfg.log, exporter, reader)
 	}
 	return nil
 }
 
 func (cfg *config) Finish() error {
-	file, err := os.OpenFile(util.EraseCompleteScanPath, os.O_RDONLY, 0)
-	if err != nil {
-		cfg.log.Error(err, "failed to open pipe", "pipeName", util.EraseCompleteScanPath)
-		return err
-	}
+	defer func() { _ = cfg.completion.Close() }()
 
-	data, err := io.ReadAll(file)
+	// Finish keeps its signature for out-of-tree scanners. cfg.ctx defaults to
+	// context.Background(), so this waits indefinitely unless a caller opted in
+	// via WithContext.
+	data, err := cfg.completion.Await(cfg.ctx)
 	if err != nil {
 		cfg.log.Error(err, "failed to read pipe", "pipeName", util.EraseCompleteScanPath)
-		return err
-	}
-
-	if err := file.Close(); err != nil {
-		cfg.log.Error(err, "failed to close pipe", "pipeName", util.EraseCompleteScanPath)
 		return err
 	}
 

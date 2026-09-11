@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"io/fs"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -21,7 +18,6 @@ import (
 	"github.com/eraser-dev/eraser/pkg/logger"
 	"github.com/eraser-dev/eraser/pkg/metrics"
 
-	"github.com/eraser-dev/eraser/api/unversioned"
 	util "github.com/eraser-dev/eraser/pkg/utils"
 )
 
@@ -30,14 +26,22 @@ var (
 	enableProfile = flag.Bool("enable-pprof", false, "enable pprof profiling")
 	profilePort   = flag.Int("pprof-port", 6060, "port for pprof profiling. defaulted to 6060 if unspecified")
 
-	// Timeout  of connecting to server (default: 5m).
-	timeout  = 5 * time.Minute
 	log      = logf.Log.WithName("remover")
 	excluded map[string]struct{}
 )
 
 const (
 	generalErr = 1
+
+	// listTimeout bounds ListImages and ListContainers together. They are cheap
+	// and near-constant, so they get a tighter budget than a deletion.
+	listTimeout = 2 * time.Minute
+
+	// deleteTimeout bounds a single image. It is per-image rather than per-run
+	// because the total is not knowable in advance: a freshly created AKS
+	// Windows node carried 30 unused images, and deletions there were measured
+	// at 15s to 74s each.
+	deleteTimeout = 5 * time.Minute
 )
 
 func main() {
@@ -69,6 +73,13 @@ func main() {
 
 	log.Info("CRI client created successfully")
 
+	// Registered below the CRI dial, which blocks on context.Background and so
+	// cannot be interrupted; covering it would suppress the default SIGTERM exit
+	// and wait for SIGKILL instead. Everything that blocks after this point takes
+	// ctx. The stop func is discarded rather than deferred because every exit path
+	// here is os.Exit, which would skip it.
+	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
 	var imagelist []string
 
 	if *imageListPtr == "" {
@@ -78,36 +89,9 @@ func main() {
 	}
 
 	if *imageListPtr == "" {
-		var f *os.File
-		for {
-			var err error
-
-			f, err = os.OpenFile(util.ScanErasePath, os.O_RDONLY, 0)
-			if err == nil {
-				break
-			}
-			if !os.IsNotExist(err) {
-				log.Error(err, "error opening scanErase pipe")
-				os.Exit(generalErr)
-			}
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		// json data is list of []unversioned.Image
-		data, err := io.ReadAll(f)
+		nonCompliantImages, err := util.ReadImagesPipe(ctx, util.ScanErasePath)
 		if err != nil {
 			log.Error(err, "error reading non-compliant images")
-			os.Exit(generalErr)
-		}
-		if err := f.Close(); err != nil {
-			log.Error(err, "error closing non-compliant images file")
-			os.Exit(generalErr)
-		}
-
-		nonCompliantImages := []unversioned.Image{}
-		if err = json.Unmarshal(data, &nonCompliantImages); err != nil {
-			log.Error(err, "error in unmarshal non-compliant images")
 			os.Exit(generalErr)
 		}
 
@@ -137,60 +121,44 @@ func main() {
 		log.Info("no images to exclude")
 	}
 
-	removed, err := removeImages(client, imagelist)
+	removed, err := removeImages(ctx, client, imagelist)
 	if err != nil {
 		log.Error(err, "failed to remove images")
 		os.Exit(generalErr)
 	}
 
+	// A signal that landed during removal was consumed rather than killing the
+	// process, and with --imagelist there is no completion write below to report
+	// it, so an interrupted run would otherwise exit 0 having removed nothing.
+	if err := ctx.Err(); err != nil {
+		log.Error(err, "terminating before removal finished", "removed", removed)
+		os.Exit(generalErr)
+	}
+
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
 		// record metrics
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-
 		exporter, reader, provider := metrics.ConfigureMetrics(ctx, log, os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 		otel.SetMeterProvider(provider)
 
 		if err := metrics.RecordMetricsRemover(ctx, otel.GetMeterProvider(), int64(removed)); err != nil {
 			log.Error(err, "error recording metrics")
 		}
-		metrics.ExportMetrics(log, exporter, reader)
-		cancel()
+		metrics.ExportMetrics(ctx, log, exporter, reader)
 	}
 
 	if *imageListPtr == "" {
-		file, err := os.OpenFile(util.EraseCompleteCollectPath, os.O_WRONLY, 0)
-		if err != nil {
-			log.Error(err, "unable to open pipe", "pipeFile", util.EraseCompleteCollectPath)
+		if err := util.WriteCompletionPipe(ctx, util.EraseCompleteCollectPath); err != nil {
+			log.Error(err, "unable to signal completion", "pipeFile", util.EraseCompleteCollectPath)
 			os.Exit(generalErr)
 		}
 
-		if _, err := file.WriteString(util.EraseCompleteMessage); err != nil {
-			log.Error(err, "unable to write to pipe", "pipeFile", util.EraseCompleteCollectPath)
-			os.Exit(generalErr)
-		}
-
-		if err := file.Close(); err != nil {
-			log.Error(err, "unable to close pipe", "pipeFile", util.EraseCompleteCollectPath)
-			os.Exit(generalErr)
-		}
-
-		file, err = os.OpenFile(util.EraseCompleteScanPath, os.O_WRONLY, fs.ModeNamedPipe)
+		err := util.WriteCompletionPipe(ctx, util.EraseCompleteScanPath)
 		// if the scanner is disabled
 		if os.IsNotExist(err) {
 			return
 		}
 		if err != nil {
-			log.Error(err, "unable to open pipe", "pipeFile", util.EraseCompleteCollectPath)
-			os.Exit(generalErr)
-		}
-
-		if _, err := file.WriteString(util.EraseCompleteMessage); err != nil {
-			log.Error(err, "unable to write to pipe", "pipeFile", util.EraseCompleteCollectPath)
-			os.Exit(generalErr)
-		}
-
-		if err := file.Close(); err != nil {
-			log.Error(err, "unable to close pipe", "pipeFile", util.EraseCompleteScanPath)
+			log.Error(err, "unable to signal completion", "pipeFile", util.EraseCompleteScanPath)
 			os.Exit(generalErr)
 		}
 	}
